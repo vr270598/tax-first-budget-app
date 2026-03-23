@@ -32,6 +32,7 @@ def get_google_data():
         return pd.DataFrame(data)
     except Exception as e:
         st.error(f"Waiting for Google Sheets Connection... {e}")
+        raise e
         return pd.DataFrame()
 
 # --- APP UI ---
