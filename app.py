@@ -1,66 +1,83 @@
-
 import streamlit as st
-import datetime
 import pandas as pd
+import gspread
+from google.oauth2.service_account import Credentials
+import datetime
 
-# --- PAGE CONFIG ---
-st.set_page_config(page_title="Tax-First Budget Pro", page_icon="💰")
+# --- CONFIG & DATA ---
+st.set_page_config(page_title="Global Tax-First Budget", layout="wide")
 
-st.title("🛡️ Tax-First Budget Engineer")
-st.markdown("---")
+COUNTRY_DATA = {
+    "India": {"currency": "₹", "default_tax": 20},
+    "United States": {"currency": "$", "default_tax": 22},
+    "United Kingdom": {"currency": "£", "default_tax": 20},
+    "UAE": {"currency": "د.إ", "default_tax": 0},
+}
 
-# --- SIDEBAR: USER INPUTS ---
-st.sidebar.header("Step 1: Financial Profile")
-gross_income = st.sidebar.number_input("Monthly Gross Income ($)", value=5000, step=100)
-fixed_costs = st.sidebar.number_input("Fixed Costs (Rent, Bills, etc.) ($)", value=1200, step=50)
+# --- GOOGLE SHEETS CONNECTION ---
+def get_google_data():
+    try:
+        # These match the [gcp_service_account] label you put in Secrets
+        scope = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds_info = st.secrets["gcp_service_account"]
+        creds = Credentials.from_service_account_info(creds_info, scopes=scope)
+        client = gspread.authorize(creds)
+        
+        # Opening your specific sheet
+        sheet_id = "1XABtmw_1csXqNItG5jrkafyTx2wXanflem2tHha1VDE"
+        sh = client.open_by_key(sheet_id)
+        worksheet = sh.worksheet("Expenses") # Ensure tab name matches!
+        
+        data = worksheet.get_all_records()
+        return pd.DataFrame(data)
+    except Exception as e:
+        st.error(f"Waiting for Google Sheets Connection... {e}")
+        return pd.DataFrame()
 
-st.sidebar.header("Step 2: Tax Strategy")
-tax_rate = st.sidebar.slider("Estimated Tax % (Manual)", 0, 50, 20)
+# --- APP UI ---
+st.title("💰 Personal Finance Command Center")
 
-st.sidebar.header("Step 3: Calendar Settings")
-# Find the last day of the current month
-today = datetime.date.today()
-if today.month == 12:
-    last_day = datetime.date(today.year + 1, 1, 1) - datetime.timedelta(days=1)
-else:
-    last_day = datetime.date(today.year, today.month + 1, 1) - datetime.timedelta(days=1)
+# Load Data from Sheets
+df = get_google_data()
 
-salary_day = st.sidebar.date_input("Next Salary Day", value=last_day)
+# Sidebar: Region & Profile
+st.sidebar.header("🌍 Region Settings")
+selected_country = st.sidebar.selectbox("Select Country", list(COUNTRY_DATA.keys()))
+currency = COUNTRY_DATA[selected_country]["currency"]
 
-# --- THE DATA ENGINE ---
-def get_working_days(start, end):
-    # Generates a list of all days between start and end
-    all_days = pd.date_range(start, end)
-    # Filters out weekends (Saturday=5, Sunday=6)
-    working_days = all_days[all_days.weekday < 5]
-    return len(working_days)
+st.sidebar.header("📈 Income & Tax")
+gross_income = st.sidebar.number_input(f"Monthly Gross ({currency})", value=100000)
+tax_rate = st.sidebar.slider("Tax Percentage (%)", 0, 50, COUNTRY_DATA[selected_country]["default_tax"])
 
 # Calculations
-est_tax = gross_income * (tax_rate / 100)
-net_income = gross_income - est_tax
-disposable_monthly = net_income - fixed_costs
-work_days_left = get_working_days(today, salary_day)
+net_income = gross_income * (1 - tax_rate/100)
 
-# Safe to Spend Logic
-if work_days_left > 0:
-    daily_safe = disposable_monthly / work_days_left
+if not df.empty and 'Amount' in df.columns:
+    total_spent = pd.to_numeric(df['Amount']).sum()
 else:
-    daily_safe = disposable_monthly
+    total_spent = 0.0
 
-# --- DASHBOARD UI ---
+disposable_income = net_income - total_spent
+
+# Metrics Display
 col1, col2, col3 = st.columns(3)
+col1.metric("Monthly Net (After Tax)", f"{currency}{net_income:,.2f}")
+col2.metric("Spent This Month", f"{currency}{total_spent:,.2f}")
+col3.metric("Remaining Balance", f"{currency}{disposable_income:,.2f}")
 
-with col1:
-    st.metric("Net Income (After Tax)", f"${net_income:,.2f}")
-with col2:
-    st.metric("Work Days Remaining", work_days_left)
-with col3:
-    st.metric("Monthly Disposable", f"${disposable_monthly:,.2f}")
+st.divider()
 
-st.markdown("---")
-st.header(f"📍 Safe to Spend Today: **${daily_safe:,.2f}**")
-st.info("This is your daily allowance based strictly on remaining working days until your next paycheck.")
+# Daily Safe-to-Spend Logic
+today = datetime.datetime.now()
+last_day = pd.Period(today.strftime('%Y-%m'), freq='D').days_in_month
+days_left = last_day - today.day + 1
 
-# Future Feature Placeholder
-st.write("---")
-st.caption("Next Weekend Sprint: Connecting to Live Google Sheets API for automated expense tracking.")
+if days_left > 0:
+    daily_safe = disposable_income / days_left
+    st.header(f"📍 Safe to Spend Today: {currency}{max(0, daily_safe):,.2f}")
+    st.caption(f"Based on {days_left} days remaining in March.")
+
+# Show Expense List
+if not df.empty:
+    with st.expander("See All Expenses"):
+        st.dataframe(df, use_container_width=True)
