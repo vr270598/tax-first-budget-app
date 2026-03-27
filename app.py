@@ -88,3 +88,24 @@ with st.expander("📝 Add Expense"):
             # Sheet order: Date | Item | Amount | Category | Email
             expense_sheet.append_row([str(datetime.date.today()), item, amt, cat, user_email])
             st.rerun()
+# --- 9. VIEW HISTORY ---
+st.divider()
+st.subheader("📜 Your Recent Expenses")
+
+if not user_expenses.empty:
+    # Sort by date (newest first) and show specific columns
+    display_df = user_expenses[['Date', 'Item', 'Amount', 'Category']].iloc[::-1]
+    
+    # Show as a clean table
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    
+    # Optional: Add a "Download as CSV" button for the user
+    csv = display_df.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📥 Download My Data",
+        data=csv,
+        file_name=f"budget_history_{user_email}.csv",
+        mime='text/csv',
+    )
+else:
+    st.info("No expenses found for your account yet. Try adding one above!")
