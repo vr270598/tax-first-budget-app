@@ -5,99 +5,86 @@ from google.oauth2.service_account import Credentials
 import datetime
 
 # --- 1. SETTINGS & STYLING ---
-st.set_page_config(page_title="Budget Tracker", layout="centered")
+st.set_page_config(page_title="Global Budget Tracker", layout="centered")
 
-# Custom CSS for a clean mobile-friendly look
-st.markdown("""
-    <style>
-    .main { background-color: #f8f9fa; }
-    div.stButton > button:first-child {
-        width: 100%; height: 3.5em; font-weight: bold;
-        background-color: #007bff; color: white; border-radius: 10px;
-    }
-    .stMetric { background-color: white; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-    </style>
-    """, unsafe_allow_html=True)
-
-# --- 2. DATA CONNECTION ---
-def get_google_sheet():
+# --- 2. CLOUD CONNECTION ---
+def get_gspread_client():
     scope = ["https://www.googleapis.com/auth/spreadsheets"]
-    try:
-        creds_info = st.secrets["gcp_service_account"]
-        creds = Credentials.from_service_account_info(creds_info, scopes=scope)
-        client = gspread.authorize(creds)
+    creds_info = st.secrets["gcp_service_account"]
+    creds = Credentials.from_service_account_info(creds_info, scopes=scope)
+    return gspread.authorize(creds)
+
+client = get_gspread_client()
+sheet_id = "1XABtmw_1csXqNItG5jrkafyTx2wXanflem2tHha1VDE"
+sh = client.open_by_key(sheet_id)
+user_sheet = sh.worksheet("Users")
+expense_sheet = sh.worksheet("Expenses")
+
+# --- 3. SIMPLE AUTH (For now, we'll use a Text Input) ---
+# In a real app, we'd use Google Login, but let's start simple.
+user_email = st.sidebar.text_input("Enter Email to Login", value="").lower().strip()
+
+if not user_email:
+    st.title("👋 Welcome to Budget Pro")
+    st.info("Please enter your email in the sidebar to access your dashboard.")
+    st.stop()
+
+# --- 4. CHECK IF USER EXISTS ---
+users_df = pd.DataFrame(user_sheet.get_all_records())
+user_data = users_df[users_df['Email'] == user_email]
+
+if user_data.empty:
+    st.warning(f"New User Detected: {user_email}")
+    with st.form("onboarding_form"):
+        st.subheader("🌍 Complete Your Profile")
+        name = st.text_input("Full Name")
+        country = st.selectbox("Country", ["India", "USA", "UK", "UAE", "Germany"])
+        currency = st.selectbox("Currency Symbol", ["₹", "$", "£", "€", "AED"])
+        income = st.number_input("Monthly Gross Income", min_value=0)
+        tax = st.number_input("Estimated Tax %", min_value=0, max_value=100)
         
-        # Open your specific sheet
-        sheet_id = "1XABtmw_1csXqNItG5jrkafyTx2wXanflem2tHha1VDE"
-        sh = client.open_by_key(sheet_id)
-        return sh.worksheet("Expenses")
-    except Exception as e:
-        st.error(f"⚠️ Connection Error: {e}")
-        st.stop()
+        if st.form_submit_button("Create My Account"):
+            user_sheet.append_row([user_email, name, country, currency, income, tax])
+            st.success("Account Created! Refreshing...")
+            st.rerun()
+    st.stop()
 
-# Load Data
-worksheet = get_google_sheet()
-data = worksheet.get_all_records()
-df = pd.DataFrame(data)
+# --- 5. LOAD USER SPECIFIC SETTINGS ---
+user_profile = user_data.iloc[0]
+CURRENCY = user_profile['Currency']
+NAME = user_profile['Name']
+NET_INCOME = user_profile['Monthly_Income'] * (1 - user_profile['Tax_Rate']/100)
 
-# --- 3. CALCULATIONS ---
-gross_income = 100000 
-tax_rate = 20
-net_income = gross_income * (1 - tax_rate/100)
-
-# Spending Logic - Ensures we only sum numbers
-if not df.empty and 'Amount' in df.columns:
-    df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0)
-    total_spent = df['Amount'].sum()
+# --- 6. DASHBOARD LOGIC (Filtered by User) ---
+all_expenses = pd.DataFrame(expense_sheet.get_all_records())
+if not all_expenses.empty and 'Email' in all_expenses.columns:
+    user_expenses = all_expenses[all_expenses['Email'] == user_email]
+    user_expenses['Amount'] = pd.to_numeric(user_expenses['Amount'], errors='coerce').fillna(0)
+    total_spent = user_expenses['Amount'].sum()
 else:
     total_spent = 0.0
 
-remaining_balance = net_income - total_spent
+# Remaining Balance & Daily Safe Spend
+rem_bal = NET_INCOME - total_spent
+days_left = pd.Period(datetime.datetime.now().strftime('%Y-%m'), freq='D').days_in_month - datetime.datetime.now().day + 1
+daily_safe = max(0, rem_bal / days_left) if days_left > 0 else 0
 
-# Daily Safe-to-Spend logic
-today = datetime.datetime.now()
-days_in_month = pd.Period(today.strftime('%Y-%m'), freq='D').days_in_month
-days_left = days_in_month - today.day + 1
-daily_safe = max(0, remaining_balance / days_left) if days_left > 0 else 0
-
-# --- 4. DASHBOARD UI ---
-st.title("💸 Budget Dashboard")
-
+# --- 7. UI ---
+st.title(f"📊 {NAME}'s Budget ({user_profile['Country']})")
 col1, col2 = st.columns(2)
-col1.metric("Remaining Balance", f"₹{remaining_balance:,.0f}")
-col2.metric("Spent So Far", f"₹{total_spent:,.0f}")
+col1.metric("Balance", f"{CURRENCY}{rem_bal:,.0f}")
+col2.metric("Spent", f"{CURRENCY}{total_spent:,.0f}")
 
-st.divider()
+st.header(f"📍 Safe to Spend Today: {CURRENCY}{daily_safe:,.0f}")
 
-# Progress Bar
-usage_pct = (total_spent / net_income) if net_income > 0 else 1.0
-st.header(f"📍 Safe to Spend Today: ₹{daily_safe:,.0f}")
-st.progress(min(1.0, usage_pct))
-st.caption(f"You've used {int(usage_pct * 100)}% of your monthly net income.")
-
-# --- 5. QUICK LOG FORM ---
-st.subheader("📝 Add New Expense")
-with st.form("add_expense", clear_on_submit=True):
-    item_name = st.text_input("What did you buy?")
-    amount_input = st.number_input("How much?", min_value=0.0, step=10.0)
-    category_input = st.selectbox("Category", ["Food", "Transport", "Bills", "Shopping", "Misc"])
-    
-    submitted = st.form_submit_button("SAVE TO SHEET")
-    
-    if submitted:
-        if item_name and amount_input > 0:
-            # FIXED ORDER: Date | Item | Amount | Category
-            new_row = [str(datetime.date.today()), item_name, amount_input, category_input]
-            worksheet.append_row(new_row)
-            st.success(f"✅ Saved {item_name} for ₹{amount_input}!")
+# --- 8. ADD EXPENSE (With Email Tagging) ---
+with st.expander("📝 Add Expense"):
+    with st.form("expense_form", clear_on_submit=True):
+        item = st.text_input("Item")
+        amt = st.number_input("Amount", min_value=0.0)
+        cat = st.selectbox("Category", ["Food", "Bills", "Shopping", "Misc"])
+        if st.form_submit_button("Save"):
+            # We add user_email to the row so we know WHO spent it!
+            # Sheet order: Date | Item | Amount | Category | Email
+            expense_sheet.append_row([str(datetime.date.today()), item, amt, cat, user_email])
             st.rerun()
-        else:
-            st.warning("Please enter a name and amount.")
-
-# --- 6. HISTORY ---
-with st.expander("View Recent Expenses"):
-    if not df.empty:
-        # Show last 10 entries, newest at the top
-        st.dataframe(df.tail(10).iloc[::-1], use_container_width=True)
-    else:
-        st.write("No expenses logged yet.")
