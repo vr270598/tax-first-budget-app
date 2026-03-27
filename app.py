@@ -52,10 +52,11 @@ if not st.session_state['auth']:
             e_log = st.text_input("Email").lower().strip()
             p_log = st.text_input("Password", type="password")
             if st.form_submit_button("Login"):
-                u_df = pd.DataFrame(user_sheet.get_all_records())
+                u_data = user_sheet.get_all_records()
+                u_df = pd.DataFrame(u_data)
                 if not u_df.empty:
-                    u_df.columns = u_df.columns.str.strip()
-                    match = u_df[u_df['Email'] == e_log]
+                    u_df.columns = u_df.columns.str.strip() # Clean headers
+                    match = u_df[u_df['Email'].str.lower() == e_log]
                     if not match.empty and str(match.iloc[0]['Password']) == hash_password(p_log):
                         st.session_state['auth'] = True
                         st.session_state['user'] = e_log
@@ -77,8 +78,9 @@ if not st.session_state['auth']:
             n_tax = st.number_input("Estimated Tax %", min_value=0.0, max_value=100.0)
             
             if st.form_submit_button("Register"):
-                u_df = pd.DataFrame(user_sheet.get_all_records())
-                if not u_df.empty and n_email in u_df['Email'].values:
+                u_data = user_sheet.get_all_records()
+                u_df = pd.DataFrame(u_data)
+                if not u_df.empty and 'Email' in u_df.columns and n_email in u_df['Email'].values:
                     st.warning("Email already registered.")
                 elif n_email and n_pass:
                     user_sheet.append_row([n_email, n_name, n_country, n_curr, n_income, n_tax, hash_password(n_pass)])
@@ -89,24 +91,32 @@ if not st.session_state['auth']:
 
 # --- 4. LOAD USER PROFILE ---
 u_email = st.session_state['user']
-u_df = pd.DataFrame(user_sheet.get_all_records())
+u_raw = user_sheet.get_all_records()
+u_df = pd.DataFrame(u_raw)
 u_df.columns = u_df.columns.str.strip()
 u_profile = u_df[u_df['Email'] == u_email].iloc[0]
 
-CURRENCY = u_profile['Currency']
-NAME = u_profile['Name']
-NET_INCOME = float(u_profile['Monthly_Income']) * (1 - float(u_profile['Tax_Rate'])/100)
+CURRENCY = u_profile.get('Currency', '₹')
+NAME = u_profile.get('Name', 'User')
+income_val = float(u_profile.get('Monthly_Income', 0))
+tax_val = float(u_profile.get('Tax_Rate', 0))
+NET_INCOME = income_val * (1 - tax_val/100)
 
 # --- 5. CALCULATIONS & FILTERING ---
 all_exp_list = expense_sheet.get_all_records()
 all_exp = pd.DataFrame(all_exp_list)
 
 if not all_exp.empty:
-    all_exp.columns = all_exp.columns.str.strip() # Clean headers
+    all_exp.columns = all_exp.columns.str.strip() # Remove hidden spaces
+    # Ensure 'Email' exists before filtering
     if 'Email' in all_exp.columns:
-        my_exp = all_exp[all_exp['Email'] == u_email].copy()
-        my_exp['Amount'] = pd.to_numeric(my_exp['Amount'], errors='coerce').fillna(0)
-        total_spent = my_exp['Amount'].sum()
+        my_exp = all_exp[all_exp['Email'].str.lower() == u_email].copy()
+        # Ensure 'Amount' exists and is numeric
+        if 'Amount' in my_exp.columns:
+            my_exp['Amount'] = pd.to_numeric(my_exp['Amount'], errors='coerce').fillna(0)
+            total_spent = my_exp['Amount'].sum()
+        else:
+            total_spent = 0.0
     else:
         my_exp = pd.DataFrame()
         total_spent = 0.0
@@ -149,11 +159,14 @@ with st.expander("📝 Log New Expense", expanded=True):
                 st.success("Saved! Your dashboard is updating...")
                 st.rerun()
 
-# --- 8. HISTORY TABLE ---
+# --- 8. HISTORY TABLE (DASHBOARD-PROOF) ---
 st.subheader("📜 Recent History")
 if not my_exp.empty:
-    # Only show these columns and flip so newest is on top
-    history_view = my_exp[['Date', 'Item', 'Amount', 'Category']].iloc[::-1]
-    st.dataframe(history_view, use_container_width=True, hide_index=True)
+    # We display everything except 'Email' to keep it clean
+    display_df = my_exp.iloc[::-1].copy()
+    if 'Email' in display_df.columns:
+        display_df = display_df.drop(columns=['Email'])
+    
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
 else:
     st.info("No records found for your account. Log an expense above!")
