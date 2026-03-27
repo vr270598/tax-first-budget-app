@@ -21,7 +21,6 @@ st.markdown("""
 
 # --- 2. DATA CONNECTION ---
 def get_google_sheet():
-    # Authenticate using Streamlit Secrets
     scope = ["https://www.googleapis.com/auth/spreadsheets"]
     try:
         creds_info = st.secrets["gcp_service_account"]
@@ -34,7 +33,6 @@ def get_google_sheet():
         return sh.worksheet("Expenses")
     except Exception as e:
         st.error(f"⚠️ Connection Error: {e}")
-        st.info("Tip: Ensure you shared the Google Sheet with 'sheets-connector@budget-app-491105.iam.gserviceaccount.com' as Editor.")
         st.stop()
 
 # Load Data
@@ -43,15 +41,13 @@ data = worksheet.get_all_records()
 df = pd.DataFrame(data)
 
 # --- 3. CALCULATIONS ---
-# Income Settings (You can change these values)
 gross_income = 100000 
 tax_rate = 20
 net_income = gross_income * (1 - tax_rate/100)
 
-# Spending Logic
+# Spending Logic - Ensures we only sum numbers
 if not df.empty and 'Amount' in df.columns:
-    # Convert 'Amount' column to numeric, ignoring errors (like text in rows)
-    df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
+    df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0)
     total_spent = df['Amount'].sum()
 else:
     total_spent = 0.0
@@ -73,11 +69,11 @@ col2.metric("Spent So Far", f"₹{total_spent:,.0f}")
 
 st.divider()
 
-# Progress Bar Logic
+# Progress Bar
 usage_pct = (total_spent / net_income) if net_income > 0 else 1.0
 st.header(f"📍 Safe to Spend Today: ₹{daily_safe:,.0f}")
 st.progress(min(1.0, usage_pct))
-st.caption(f"You have used {int(usage_pct * 100)}% of your monthly net income.")
+st.caption(f"You've used {int(usage_pct * 100)}% of your monthly net income.")
 
 # --- 5. QUICK LOG FORM ---
 st.subheader("📝 Add New Expense")
@@ -90,10 +86,10 @@ with st.form("add_expense", clear_on_submit=True):
     
     if submitted:
         if item_name and amount_input > 0:
-            # Append row: Date, Item, Category, Amount
-            new_row = [str(datetime.date.today()), item_name, category_input, amount_input]
+            # FIXED ORDER: Date | Item | Amount | Category
+            new_row = [str(datetime.date.today()), item_name, amount_input, category_input]
             worksheet.append_row(new_row)
-            st.success(f"✅ Saved {item_name}!")
+            st.success(f"✅ Saved {item_name} for ₹{amount_input}!")
             st.rerun()
         else:
             st.warning("Please enter a name and amount.")
@@ -101,6 +97,7 @@ with st.form("add_expense", clear_on_submit=True):
 # --- 6. HISTORY ---
 with st.expander("View Recent Expenses"):
     if not df.empty:
-        st.dataframe(df.tail(10), use_container_width=True)
+        # Show last 10 entries, newest at the top
+        st.dataframe(df.tail(10).iloc[::-1], use_container_width=True)
     else:
         st.write("No expenses logged yet.")
