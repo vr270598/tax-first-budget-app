@@ -53,13 +53,17 @@ if not st.session_state['auth']:
             p_log = st.text_input("Password", type="password")
             if st.form_submit_button("Login"):
                 u_df = pd.DataFrame(user_sheet.get_all_records())
-                match = u_df[u_df['Email'] == e_log]
-                if not match.empty and str(match.iloc[0]['Password']) == hash_password(p_log):
-                    st.session_state['auth'] = True
-                    st.session_state['user'] = e_log
-                    st.rerun()
+                if not u_df.empty:
+                    u_df.columns = u_df.columns.str.strip()
+                    match = u_df[u_df['Email'] == e_log]
+                    if not match.empty and str(match.iloc[0]['Password']) == hash_password(p_log):
+                        st.session_state['auth'] = True
+                        st.session_state['user'] = e_log
+                        st.rerun()
+                    else:
+                        st.error("Invalid Email or Password")
                 else:
-                    st.error("Invalid Email or Password")
+                    st.error("No users registered yet.")
 
     with tab2:
         with st.form("signup_form"):
@@ -69,12 +73,12 @@ if not st.session_state['auth']:
             n_pass = st.text_input("Password", type="password")
             n_country = st.selectbox("Country", ["India", "USA", "UK", "UAE", "Europe"])
             n_curr = st.selectbox("Currency", ["₹", "$", "£", "AED", "€"])
-            n_income = st.number_input("Monthly Gross Income", min_value=0)
-            n_tax = st.number_input("Estimated Tax %", min_value=0, max_value=100)
+            n_income = st.number_input("Monthly Gross Income", min_value=0.0)
+            n_tax = st.number_input("Estimated Tax %", min_value=0.0, max_value=100.0)
             
             if st.form_submit_button("Register"):
                 u_df = pd.DataFrame(user_sheet.get_all_records())
-                if n_email in u_df['Email'].values:
+                if not u_df.empty and n_email in u_df['Email'].values:
                     st.warning("Email already registered.")
                 elif n_email and n_pass:
                     user_sheet.append_row([n_email, n_name, n_country, n_curr, n_income, n_tax, hash_password(n_pass)])
@@ -83,33 +87,45 @@ if not st.session_state['auth']:
                     st.error("Please fill all fields.")
     st.stop()
 
-# --- 4. LOAD USER DATA ---
+# --- 4. LOAD USER PROFILE ---
 u_email = st.session_state['user']
 u_df = pd.DataFrame(user_sheet.get_all_records())
+u_df.columns = u_df.columns.str.strip()
 u_profile = u_df[u_df['Email'] == u_email].iloc[0]
 
 CURRENCY = u_profile['Currency']
 NAME = u_profile['Name']
 NET_INCOME = float(u_profile['Monthly_Income']) * (1 - float(u_profile['Tax_Rate'])/100)
 
-# --- 5. CALCULATIONS ---
-all_exp = pd.DataFrame(expense_sheet.get_all_records())
-if not all_exp.empty and 'Email' in all_exp.columns:
-    my_exp = all_exp[all_exp['Email'] == u_email].copy()
-    my_exp['Amount'] = pd.to_numeric(my_exp['Amount'], errors='coerce').fillna(0)
-    total_spent = my_exp['Amount'].sum()
+# --- 5. CALCULATIONS & FILTERING ---
+all_exp_list = expense_sheet.get_all_records()
+all_exp = pd.DataFrame(all_exp_list)
+
+if not all_exp.empty:
+    all_exp.columns = all_exp.columns.str.strip() # Clean headers
+    if 'Email' in all_exp.columns:
+        my_exp = all_exp[all_exp['Email'] == u_email].copy()
+        my_exp['Amount'] = pd.to_numeric(my_exp['Amount'], errors='coerce').fillna(0)
+        total_spent = my_exp['Amount'].sum()
+    else:
+        my_exp = pd.DataFrame()
+        total_spent = 0.0
 else:
     my_exp = pd.DataFrame()
     total_spent = 0.0
 
 rem_bal = NET_INCOME - total_spent
 today = datetime.datetime.now()
-days_left = (pd.Period(today.strftime('%Y-%m'), freq='D').days_in_month - today.day) + 1
+days_in_month = pd.Period(today.strftime('%Y-%m'), freq='D').days_in_month
+days_left = (days_in_month - today.day) + 1
 daily_safe = max(0, rem_bal / days_left) if days_left > 0 else 0
 
 # --- 6. DASHBOARD UI ---
 st.title(f"📊 {NAME}'s Budget")
-st.sidebar.button("Logout", on_click=lambda: st.session_state.update({'auth': False, 'user': None}))
+st.sidebar.write(f"Logged in as: **{u_email}**")
+if st.sidebar.button("Logout"):
+    st.session_state.update({'auth': False, 'user': None})
+    st.rerun()
 
 c1, c2 = st.columns(2)
 c1.metric("Balance", f"{CURRENCY}{rem_bal:,.0f}")
@@ -117,7 +133,8 @@ c2.metric("Spent", f"{CURRENCY}{total_spent:,.0f}")
 
 st.divider()
 st.header(f"📍 Safe to Spend Today: {CURRENCY}{daily_safe:,.0f}")
-st.progress(min(1.0, total_spent/NET_INCOME if NET_INCOME > 0 else 0))
+usage_bar = min(1.0, total_spent/NET_INCOME if NET_INCOME > 0 else 0)
+st.progress(usage_bar)
 
 # --- 7. ADD EXPENSE ---
 with st.expander("📝 Log New Expense", expanded=True):
@@ -129,13 +146,14 @@ with st.expander("📝 Log New Expense", expanded=True):
             if f_item and f_amt > 0:
                 # Order: Date | Item | Amount | Category | Email
                 expense_sheet.append_row([str(datetime.date.today()), f_item, f_amt, f_cat, u_email])
-                st.success("Saved!")
+                st.success("Saved! Your dashboard is updating...")
                 st.rerun()
 
-# --- 8. HISTORY ---
+# --- 8. HISTORY TABLE ---
 st.subheader("📜 Recent History")
 if not my_exp.empty:
+    # Only show these columns and flip so newest is on top
     history_view = my_exp[['Date', 'Item', 'Amount', 'Category']].iloc[::-1]
     st.dataframe(history_view, use_container_width=True, hide_index=True)
 else:
-    st.info("No records yet. Start logging above!")
+    st.info("No records found for your account. Log an expense above!")
