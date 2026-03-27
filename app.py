@@ -1,101 +1,172 @@
 import streamlit as st
-from streamlit_gsheets import GSheetsConnection
 import pandas as pd
-import plotly.express as px
-from datetime import datetime
+import gspread
+from google.oauth2.service_account import Credentials
+import datetime
+import hashlib
 
-# --- PAGE CONFIG ---
-st.set_page_config(page_title="Personal Budget Tracker", page_icon="💰", layout="wide")
+# --- 1. SETTINGS & STYLING ---
+st.set_page_config(page_title="Global Budget Pro", layout="centered")
 
-# --- 1. CONNECTION SETUP ---
-# This looks for [connections.gsheets] in your Streamlit Secrets
-conn = st.connection("gsheets", type=GSheetsConnection)
+st.markdown("""
+    <style>
+    .main { background-color: #f8f9fa; }
+    div.stButton > button:first-child {
+        width: 100%; height: 3em; font-weight: bold;
+        background-color: #007bff; color: white; border-radius: 8px;
+    }
+    .stMetric { background-color: white; padding: 15px; border-radius: 10px; border: 1px solid #eee; }
+    </style>
+    """, unsafe_allow_html=True)
 
-# --- 2. SIDEBAR / USER SETTINGS ---
-st.sidebar.title("👤 User Profile")
-user_email = st.sidebar.text_input("Enter Email to Filter Data:", "your-email@example.com")
-monthly_budget = st.sidebar.number_input("Monthly Budget (₹)", min_value=0, value=25000)
+# --- 2. SECURITY & CLOUD CONNECTION ---
+def hash_password(password):
+    return hashlib.sha256(str.encode(password)).hexdigest()
 
-st.sidebar.divider()
-st.sidebar.info("Tip: Ensure the 'email' column in your Google Sheet matches the input above exactly.")
+def get_google_sheets():
+    scope = ["https://www.googleapis.com/auth/spreadsheets"]
+    try:
+        creds_info = st.secrets["gcp_service_account"]
+        creds = Credentials.from_service_account_info(creds_info, scopes=scope)
+        client = gspread.authorize(creds)
+        sheet_id = "1XABtmw_1csXqNItG5jrkafyTx2wXanflem2tHha1VDE"
+        sh = client.open_by_key(sheet_id)
+        return sh.worksheet("Users"), sh.worksheet("Expenses")
+    except Exception as e:
+        st.error(f"Connection Error: {e}")
+        st.stop()
 
-# --- 3. DATA LOADING LOGIC ---
-st.title("📊 Expense Dashboard")
+user_sheet, expense_sheet = get_google_sheets()
 
-try:
-    # Read the data. 
-    # NOTE: 'worksheet' must match your Google Sheet tab name EXACTLY (case-sensitive)
-    df = conn.read(worksheet="Expenses", ttl="0")
-    
-    # Check if the dataframe is empty or missing columns
-    if df is not None and not df.empty:
-        
-        # Standardize column names to lowercase to avoid "KeyErrors"
-        df.columns = [c.lower() for c in df.columns]
-        
-        # Filter for the specific user
-        mask = df['email'].str.lower() == user_email.lower()
-        user_df = df[mask].copy()
-        
-        # Convert 'date' column to datetime objects
-        user_df['date'] = pd.to_datetime(user_df['date'], errors='coerce')
-        user_df = user_df.dropna(subset=['date'])
+# --- 3. AUTHENTICATION LOGIC ---
+if 'auth' not in st.session_state:
+    st.session_state['auth'] = False
+    st.session_state['user'] = None
 
-        # --- 4. METRICS SECTION ---
-        total_spent = user_df['amount'].sum()
-        remaining = monthly_budget - total_spent
-        
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total Spent", f"₹{total_spent:,.2f}")
-        col2.metric("Remaining", f"₹{remaining:,.2f}", delta_color="inverse")
-        
-        usage_pct = (total_spent / monthly_budget) * 100 if monthly_budget > 0 else 0
-        col3.metric("Budget Usage", f"{usage_pct:.1f}%")
-        
-        st.progress(min(usage_pct / 100, 1.0))
+if not st.session_state['auth']:
+    st.title("🔐 Secure Budget Login")
+    tab1, tab2 = st.tabs(["Login", "Create Account"])
 
-        st.divider()
+    with tab1:
+        with st.form("login_form"):
+            e_log = st.text_input("Email").lower().strip()
+            p_log = st.text_input("Password", type="password")
+            if st.form_submit_button("Login"):
+                u_data = user_sheet.get_all_records()
+                u_df = pd.DataFrame(u_data)
+                if not u_df.empty:
+                    u_df.columns = u_df.columns.str.strip() # Clean headers
+                    match = u_df[u_df['Email'].str.lower() == e_log]
+                    if not match.empty and str(match.iloc[0]['Password']) == hash_password(p_log):
+                        st.session_state['auth'] = True
+                        st.session_state['user'] = e_log
+                        st.rerun()
+                    else:
+                        st.error("Invalid Email or Password")
+                else:
+                    st.error("No users registered yet.")
 
-        # --- 5. VISUALIZATIONS ---
-        if not user_df.empty:
-            c1, c2 = st.columns(2)
+    with tab2:
+        with st.form("signup_form"):
+            st.subheader("Join Budget Pro")
+            n_email = st.text_input("Email").lower().strip()
+            n_name = st.text_input("Full Name")
+            n_pass = st.text_input("Password", type="password")
+            n_country = st.selectbox("Country", ["India", "USA", "UK", "UAE", "Europe"])
+            n_curr = st.selectbox("Currency", ["₹", "$", "£", "AED", "€"])
+            n_income = st.number_input("Monthly Gross Income", min_value=0.0)
+            n_tax = st.number_input("Estimated Tax %", min_value=0.0, max_value=100.0)
             
-            with c1:
-                st.subheader("🍕 Spending by Category")
-                fig_pie = px.pie(user_df, values='amount', names='category', hole=0.4)
-                st.plotly_chart(fig_pie, use_container_width=True)
-                
-            with c2:
-                st.subheader("📅 Spending Trend")
-                daily_trend = user_df.groupby('date')['amount'].sum().reset_index()
-                fig_line = px.line(daily_trend, x='date', y='amount', markers=True)
-                st.plotly_chart(fig_line, use_container_width=True)
+            if st.form_submit_button("Register"):
+                u_data = user_sheet.get_all_records()
+                u_df = pd.DataFrame(u_data)
+                if not u_df.empty and 'Email' in u_df.columns and n_email in u_df['Email'].values:
+                    st.warning("Email already registered.")
+                elif n_email and n_pass:
+                    user_sheet.append_row([n_email, n_name, n_country, n_curr, n_income, n_tax, hash_password(n_pass)])
+                    st.success("Registration successful! Go to Login tab.")
+                else:
+                    st.error("Please fill all fields.")
+    st.stop()
 
-            st.subheader("📜 Recent Transactions")
-            st.dataframe(user_df.sort_values(by='date', ascending=False), use_container_width=True)
+# --- 4. LOAD USER PROFILE ---
+u_email = st.session_state['user']
+u_raw = user_sheet.get_all_records()
+u_df = pd.DataFrame(u_raw)
+u_df.columns = u_df.columns.str.strip()
+u_profile = u_df[u_df['Email'] == u_email].iloc[0]
+
+CURRENCY = u_profile.get('Currency', '₹')
+NAME = u_profile.get('Name', 'User')
+income_val = float(u_profile.get('Monthly_Income', 0))
+tax_val = float(u_profile.get('Tax_Rate', 0))
+NET_INCOME = income_val * (1 - tax_val/100)
+
+# --- 5. CALCULATIONS & FILTERING ---
+all_exp_list = expense_sheet.get_all_records()
+all_exp = pd.DataFrame(all_exp_list)
+
+if not all_exp.empty:
+    all_exp.columns = all_exp.columns.str.strip() # Remove hidden spaces
+    # Ensure 'Email' exists before filtering
+    if 'Email' in all_exp.columns:
+        my_exp = all_exp[all_exp['Email'].str.lower() == u_email].copy()
+        # Ensure 'Amount' exists and is numeric
+        if 'Amount' in my_exp.columns:
+            my_exp['Amount'] = pd.to_numeric(my_exp['Amount'], errors='coerce').fillna(0)
+            total_spent = my_exp['Amount'].sum()
         else:
-            st.warning(f"No data found for user: {user_email}. Please add an expense below.")
-
+            total_spent = 0.0
     else:
-        st.error("The Google Sheet is empty or the 'Expenses' tab was not found.")
+        my_exp = pd.DataFrame()
+        total_spent = 0.0
+else:
+    my_exp = pd.DataFrame()
+    total_spent = 0.0
 
-except Exception as e:
-    st.error("🚨 Connection Diagnostic")
-    st.write(f"**Error Details:** {e}")
-    st.info("""
-    **Common Fixes for 404 / Connection Errors:**
-    1. **Tab Name:** Is your Google Sheet tab named exactly **Expenses**? (Check for trailing spaces!)
-    2. **Sharing:** Did you share the Google Sheet with the `client_email` as an **Editor**?
-    3. **Secrets:** Does your Streamlit Cloud Secret have the correct `spreadsheet` URL?
-    """)
+rem_bal = NET_INCOME - total_spent
+today = datetime.datetime.now()
+days_in_month = pd.Period(today.strftime('%Y-%m'), freq='D').days_in_month
+days_left = (days_in_month - today.day) + 1
+daily_safe = max(0, rem_bal / days_left) if days_left > 0 else 0
 
-# --- 6. MANUAL DATA ENTRY ---
-with st.expander("➕ Add New Expense Manually"):
-    with st.form("add_expense"):
-        new_date = st.date_input("Date", datetime.now())
-        new_item = st.text_input("Item/Description")
-        new_amount = st.number_input("Amount", min_value=0.0)
-        new_cat = st.selectbox("Category", ["Food", "Transport", "Shopping", "Bills", "Health", "Misc"])
-        
-        if st.form_submit_button("Submit Expense"):
-            st.info("Note: Manual submission requires additional 'Write' permissions logic. For now, log via WhatsApp or add manually to the Sheet.")
+# --- 6. DASHBOARD UI ---
+st.title(f"📊 {NAME}'s Budget")
+st.sidebar.write(f"Logged in as: **{u_email}**")
+if st.sidebar.button("Logout"):
+    st.session_state.update({'auth': False, 'user': None})
+    st.rerun()
+
+c1, c2 = st.columns(2)
+c1.metric("Balance", f"{CURRENCY}{rem_bal:,.0f}")
+c2.metric("Spent", f"{CURRENCY}{total_spent:,.0f}")
+
+st.divider()
+st.header(f"📍 Safe to Spend Today: {CURRENCY}{daily_safe:,.0f}")
+usage_bar = min(1.0, total_spent/NET_INCOME if NET_INCOME > 0 else 0)
+st.progress(usage_bar)
+
+# --- 7. ADD EXPENSE ---
+with st.expander("📝 Log New Expense", expanded=True):
+    with st.form("exp_form", clear_on_submit=True):
+        f_item = st.text_input("What did you buy?")
+        f_amt = st.number_input("Amount", min_value=0.0, step=10.0)
+        f_cat = st.selectbox("Category", ["Food", "Transport", "Shopping", "Bills", "Health", "Misc"])
+        if st.form_submit_button("SAVE EXPENSE"):
+            if f_item and f_amt > 0:
+                # Order: Date | Item | Amount | Category | Email
+                expense_sheet.append_row([str(datetime.date.today()), f_item, f_amt, f_cat, u_email])
+                st.success("Saved! Your dashboard is updating...")
+                st.rerun()
+
+# --- 8. HISTORY TABLE (DASHBOARD-PROOF) ---
+st.subheader("📜 Recent History")
+if not my_exp.empty:
+    # We display everything except 'Email' to keep it clean
+    display_df = my_exp.iloc[::-1].copy()
+    if 'Email' in display_df.columns:
+        display_df = display_df.drop(columns=['Email'])
+    
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+else:
+    st.info("No records found for your account. Log an expense above!")
