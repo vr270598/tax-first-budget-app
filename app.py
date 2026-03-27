@@ -4,81 +4,69 @@ import gspread
 from google.oauth2.service_account import Credentials
 import datetime
 
-# --- CONFIG & DATA ---
-st.set_page_config(page_title="Global Tax-First Budget", layout="wide")
+# --- 1. SETTINGS & STYLING ---
+st.set_page_config(page_title="Budget Tracker", layout="centered")
 
-COUNTRY_DATA = {
-    "India": {"currency": "₹", "default_tax": 20},
-    "United States": {"currency": "$", "default_tax": 22},
-    "United Kingdom": {"currency": "£", "default_tax": 20},
-    "UAE": {"currency": "د.إ", "default_tax": 0},
-}
+# Custom CSS to make it look like a mobile app
+st.markdown("""
+    <style>
+    .main { background-color: #f8f9fa; }
+    div.stButton > button:first-child {
+        width: 100%; height: 3.5em; font-weight: bold;
+        background-color: #007bff; color: white; border-radius: 10px;
+    }
+    .stMetric { background-color: white; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    </style>
+    """, unsafe_allow_html=True)
 
-# --- GOOGLE SHEETS CONNECTION ---
-def get_google_data():
-    try:
-        # These match the [gcp_service_account] label you put in Secrets
-        scope = ["https://www.googleapis.com/auth/spreadsheets"]
-        creds_info = st.secrets["gcp_service_account"]
-        creds = Credentials.from_service_account_info(creds_info, scopes=scope)
-        client = gspread.authorize(creds)
-        
-        # Opening your specific sheet
-        sheet_id = "1XABtmw_1csXqNItG5jrkafyTx2wXanflem2tHha1VDE"
-        sh = client.open_by_key(sheet_id)
-        worksheet = sh.worksheet("Expenses") # Ensure tab name matches!
-        
-        data = worksheet.get_all_records()
-        return pd.DataFrame(data)
-    except Exception as e:
-        st.error(f"Waiting for Google Sheets Connection... {e}")
-        raise e
-        return pd.DataFrame()
+# --- 2. DATA CONNECTION ---
+def get_google_sheet():
+    # Authenticate using Streamlit Secrets
+    scope = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds_info = st.secrets["gcp_service_account"]
+    creds = Credentials.from_service_account_info(creds_info, scopes=scope)
+    client = gspread.authorize(creds)
+    
+    # Open your specific sheet
+    sheet_id = "1XABtmw_1csXqNItG5jrkafyTx2wXanflem2tHha1VDE"
+    sh = client.open_by_key(sheet_id)
+    return sh.worksheet("Expenses")
 
-# --- APP UI ---
-st.title("💰 Personal Finance Command Center")
+# Load Data
+try:
+    worksheet = get_google_sheet()
+    data = worksheet.get_all_records()
+    df = pd.DataFrame(data)
+except Exception as e:
+    st.error("⚠️ Connection Error: Ensure you shared the Google Sheet with your Service Account email as 'Editor'.")
+    st.stop()
 
-# Load Data from Sheets
-df = get_google_data()
-
-# Sidebar: Region & Profile
-st.sidebar.header("🌍 Region Settings")
-selected_country = st.sidebar.selectbox("Select Country", list(COUNTRY_DATA.keys()))
-currency = COUNTRY_DATA[selected_country]["currency"]
-
-st.sidebar.header("📈 Income & Tax")
-gross_income = st.sidebar.number_input(f"Monthly Gross ({currency})", value=100000)
-tax_rate = st.sidebar.slider("Tax Percentage (%)", 0, 50, COUNTRY_DATA[selected_country]["default_tax"])
-
-# Calculations
+# --- 3. CALCULATIONS ---
+# Income Settings (Adjust these values as needed)
+gross_income = 100000 
+tax_rate = 20
 net_income = gross_income * (1 - tax_rate/100)
 
+# Spending Logic
 if not df.empty and 'Amount' in df.columns:
-    total_spent = pd.to_numeric(df['Amount']).sum()
+    total_spent = pd.to_numeric(df['Amount'], errors='coerce').sum()
 else:
     total_spent = 0.0
 
-disposable_income = net_income - total_spent
+remaining_balance = net_income - total_spent
 
-# Metrics Display
-col1, col2, col3 = st.columns(3)
-col1.metric("Monthly Net (After Tax)", f"{currency}{net_income:,.2f}")
-col2.metric("Spent This Month", f"{currency}{total_spent:,.2f}")
-col3.metric("Remaining Balance", f"{currency}{disposable_income:,.2f}")
+# Daily Safe-to-Spend
+today = datetime.datetime.now()
+days_in_month = pd.Period(today.strftime('%Y-%m'), freq='D').days_in_month
+days_left = days_in_month - today.day + 1
+daily_safe = max(0, remaining_balance / days_left) if days_left > 0 else 0
+
+# --- 4. DASHBOARD UI ---
+st.title("💸 Budget Dashboard")
+
+col1, col2 = st.columns(2)
+col1.metric("Remaining Balance", f"₹{remaining_balance:,.0f}")
+col2.metric("Spent So Far", f"₹{total_spent:,.0f}")
 
 st.divider()
-
-# Daily Safe-to-Spend Logic
-today = datetime.datetime.now()
-last_day = pd.Period(today.strftime('%Y-%m'), freq='D').days_in_month
-days_left = last_day - today.day + 1
-
-if days_left > 0:
-    daily_safe = disposable_income / days_left
-    st.header(f"📍 Safe to Spend Today: {currency}{max(0, daily_safe):,.2f}")
-    st.caption(f"Based on {days_left} days remaining in March.")
-
-# Show Expense List
-if not df.empty:
-    with st.expander("See All Expenses"):
-        st.dataframe(df, use_container_width=True)
+st.header(f"📍 Safe to Spend Today: ₹{daily_safe:,.
