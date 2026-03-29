@@ -19,37 +19,52 @@ st.markdown("""
         background-color: #1E88E5; color: white; border-radius: 12px;
         border: none; transition: 0.3s;
     }
-    div.stButton > button:hover { background-color: #1565C0; border: none; }
+    div.stButton > button:hover { background-color: #1565C0; }
     .stMetric { background-color: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
     .instruction-card { background-color: #e3f2fd; padding: 15px; border-radius: 10px; border-left: 5px solid #1E88E5; margin-bottom: 20px; }
     </style>
     """, unsafe_allow_html=True)
 
 # --- 2. AI CONFIGURATION (GEMINI) ---
-try:
-    genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-    model = genai.GenerativeModel('gemini-1.5-flash')
-except Exception as e:
-    st.error("AI Configuration missing. Please add GOOGLE_API_KEY to secrets.")
+def setup_ai():
+    try:
+        api_key = st.secrets.get("GOOGLE_API_KEY")
+        if not api_key:
+            st.error("Missing GOOGLE_API_KEY in secrets!")
+            return None
+        genai.configure(api_key=api_key)
+        return genai.GenerativeModel('gemini-1.5-flash')
+    except Exception as e:
+        st.error(f"AI Setup Error: {e}")
+        return None
+
+model = setup_ai()
 
 def ask_paisa_dasangu(user_text):
-    """Parses natural language into structured JSON using Gemini"""
+    """Parses natural language into structured JSON using Gemini with Regex cleaning"""
     prompt = f"""
-    You are Paisa-Dasangu, a smart expense manager for Indian users. 
+    You are Paisa-Dasangu, a smart expense manager. 
     Extract details from: '{user_text}'
     Return ONLY a JSON object: 
     {{ "item": "string", "amount": number, "category": "Food/Transport/Bills/Shopping/Health/Misc" }}
     
     Rules:
-    1. If currency is not mentioned, assume it is numeric.
-    2. Categories must strictly be one of the 6 listed.
-    3. If 'amount' is missing, use 0.
-    4. Handle Hinglish (e.g., '60 rickshaw ko diye' -> item: Rickshaw, amount: 60, category: Transport).
+    1. Categories MUST be one of: Food, Transport, Bills, Shopping, Health, Misc.
+    2. If amount is missing, use 0. 
+    3. If 'item' is missing, use 'Unknown'.
     """
-    response = model.generate_content(prompt)
-    # Clean response text to ensure only JSON is parsed
-    clean_json = re.search(r'\{.*\}', response.text, re.DOTALL).group()
-    return json.loads(clean_json)
+    try:
+        response = model.generate_content(prompt)
+        # Regex to find the JSON block inside potential markdown backticks
+        match = re.search(r'\{.*\}', response.text, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+        else:
+            # Fallback if AI sends plain text
+            return {"item": "Manual Entry Required", "amount": 0, "category": "Misc"}
+    except Exception as e:
+        st.error(f"AI Error: {e}")
+        return None
 
 # --- 3. CLOUD CONNECTION (GOOGLE SHEETS) ---
 def hash_password(password):
@@ -137,31 +152,30 @@ c1, c2 = st.columns(2)
 c1.metric("Balance", f"{CURRENCY}{rem_bal:,.0f}")
 c2.metric("Spent", f"{CURRENCY}{total_spent:,.0f}")
 
-# --- 7. THE AI "WHATSAPP" INPUT ---
-st.markdown('<div class="instruction-card"><b>Quick Log:</b> Just type like you are messaging a friend!</div>', unsafe_allow_html=True)
-ai_input = st.text_input("Message Paisa-Dasangu:", placeholder="e.g. 150 for masala dosa or petrol 1000")
+# --- 7. THE AI "QUICK LOG" ---
+st.markdown('<div class="instruction-card"><b>Quick Log:</b> Message Paisa-Dasangu to record expenses.</div>', unsafe_allow_html=True)
 
-if ai_input:
-    try:
-        with st.spinner("Recording your hisaab..."):
-            data = ask_paisa_dasangu(ai_input)
-            if data['amount'] > 0:
-                expense_sheet.append_row([str(datetime.date.today()), data['item'], data['amount'], data['category'], u_email])
-                st.toast(f"✅ Saved: {data['item']} ({CURRENCY}{data['amount']})", icon="💰")
-                st.rerun()
-            else:
-                st.warning("I couldn't find an amount. Please specify the price!")
-    except Exception as e:
-        st.error("AI is a bit sleepy. Try again or use manual entry below.")
+with st.form("ai_form", clear_on_submit=True):
+    ai_input = st.text_input("Type here:", placeholder="e.g. 500 for dinner or 100 rickshaw")
+    submit_ai = st.form_submit_button("SEND TO PAISA-DASANGU")
+
+if submit_ai and ai_input:
+    with st.spinner("Recording your hisaab..."):
+        data = ask_paisa_dasangu(ai_input)
+        if data and data.get('amount', 0) > 0:
+            expense_sheet.append_row([str(datetime.date.today()), data['item'], data['amount'], data['category'], u_email])
+            st.toast(f"✅ Saved: {data['item']} ({CURRENCY}{data['amount']})", icon="💰")
+            st.rerun()
+        else:
+            st.warning("I couldn't find an amount. Try again!")
 
 # --- 8. HISTORY ---
 with st.expander("📝 Manual Entry & History"):
-    # Optional Manual Form
-    with st.form("manual"):
+    with st.form("manual", clear_on_submit=True):
         m_item = st.text_input("Item")
         m_amt = st.number_input("Amount", min_value=0.0)
         m_cat = st.selectbox("Category", ["Food", "Transport", "Bills", "Shopping", "Health", "Misc"])
-        if st.form_submit_button("Add Manually"):
+        if st.form_submit_button("Add Record Manually"):
             expense_sheet.append_row([str(datetime.date.today()), m_item, m_amt, m_cat, u_email])
             st.rerun()
     
