@@ -4,10 +4,12 @@ import gspread
 from google.oauth2.service_account import Credentials
 import datetime
 import hashlib
+import google.generativeai as genai
+import json
+import re
 
 # --- 1. SETTINGS & STYLING ---
-# Updated Brand Name: Paisa-Dasangu
-st.set_page_config(page_title="Paisa-Dasangu | Smart Finance", layout="centered", page_icon="💰")
+st.set_page_config(page_title="Paisa-Dasangu | AI Finance", layout="centered", page_icon="💰")
 
 st.markdown("""
     <style>
@@ -18,147 +20,151 @@ st.markdown("""
         border: none; transition: 0.3s;
     }
     div.stButton > button:hover { background-color: #1565C0; border: none; }
-    .stMetric { background-color: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+    .stMetric { background-color: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+    .instruction-card { background-color: #e3f2fd; padding: 15px; border-radius: 10px; border-left: 5px solid #1E88E5; margin-bottom: 20px; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. SECURITY & CLOUD CONNECTION ---
+# --- 2. AI CONFIGURATION (GEMINI) ---
+try:
+    genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+    model = genai.GenerativeModel('gemini-1.5-flash')
+except Exception as e:
+    st.error("AI Configuration missing. Please add GOOGLE_API_KEY to secrets.")
+
+def ask_paisa_dasangu(user_text):
+    """Parses natural language into structured JSON using Gemini"""
+    prompt = f"""
+    You are Paisa-Dasangu, a smart expense manager for Indian users. 
+    Extract details from: '{user_text}'
+    Return ONLY a JSON object: 
+    {{ "item": "string", "amount": number, "category": "Food/Transport/Bills/Shopping/Health/Misc" }}
+    
+    Rules:
+    1. If currency is not mentioned, assume it is numeric.
+    2. Categories must strictly be one of the 6 listed.
+    3. If 'amount' is missing, use 0.
+    4. Handle Hinglish (e.g., '60 rickshaw ko diye' -> item: Rickshaw, amount: 60, category: Transport).
+    """
+    response = model.generate_content(prompt)
+    # Clean response text to ensure only JSON is parsed
+    clean_json = re.search(r'\{.*\}', response.text, re.DOTALL).group()
+    return json.loads(clean_json)
+
+# --- 3. CLOUD CONNECTION (GOOGLE SHEETS) ---
 def hash_password(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
 
-@st.cache_resource # Keeps connection alive without reloading every time
+@st.cache_resource
 def get_google_sheets():
     scope = ["https://www.googleapis.com/auth/spreadsheets"]
     try:
-        # Note: Your secrets must have [gcp_service_account] header
         creds_info = st.secrets["gcp_service_account"]
         creds = Credentials.from_service_account_info(creds_info, scopes=scope)
         client = gspread.authorize(creds)
-        # Using your existing Sheet ID
         sheet_id = "1XABtmw_1csXqNItG5jrkafyTx2wXanflem2tHha1VDE"
         sh = client.open_by_key(sheet_id)
         return sh.worksheet("Users"), sh.worksheet("Expenses")
     except Exception as e:
-        st.error(f"Paisa-Dasangu Connection Error: {e}")
+        st.error(f"Connection Error: {e}")
         st.stop()
 
 user_sheet, expense_sheet = get_google_sheets()
 
-# --- 3. AUTHENTICATION LOGIC ---
+# --- 4. AUTHENTICATION ---
 if 'auth' not in st.session_state:
     st.session_state['auth'] = False
     st.session_state['user'] = None
 
 if not st.session_state['auth']:
     st.title("💰 Paisa-Dasangu")
-    st.subheader("Your Financial Health Partner")
-    tab1, tab2 = st.tabs(["Login", "Join Paisa-Dasangu"])
-
+    tab1, tab2 = st.tabs(["Login", "Register"])
+    
     with tab1:
         with st.form("login_form"):
             e_log = st.text_input("Email").lower().strip()
             p_log = st.text_input("Password", type="password")
-            if st.form_submit_button("Login to Dashboard"):
-                u_data = user_sheet.get_all_records()
-                u_df = pd.DataFrame(u_data)
+            if st.form_submit_button("Sign In"):
+                u_df = pd.DataFrame(user_sheet.get_all_records())
                 if not u_df.empty:
-                    u_df.columns = u_df.columns.str.strip() 
+                    u_df.columns = u_df.columns.str.strip()
                     match = u_df[u_df['Email'].str.lower() == e_log]
                     if not match.empty and str(match.iloc[0]['Password']) == hash_password(p_log):
                         st.session_state['auth'] = True
                         st.session_state['user'] = e_log
                         st.rerun()
-                    else:
-                        st.error("Incorrect credentials. Please try again.")
-                else:
-                    st.error("No users registered.")
-
+                st.error("Invalid credentials.")
+    
     with tab2:
-        with st.form("signup_form"):
-            st.subheader("Start Your Journey")
+        with st.form("signup"):
             n_email = st.text_input("Email").lower().strip()
-            n_name = st.text_input("Full Name")
+            n_name = st.text_input("Name")
             n_pass = st.text_input("Password", type="password")
-            n_curr = st.selectbox("Currency", ["₹", "$", "AED", "£"])
+            n_curr = st.selectbox("Currency", ["₹", "$", "AED"])
             n_income = st.number_input("Monthly Income", min_value=0.0)
             n_tax = st.number_input("Tax %", min_value=0.0, max_value=100.0)
-            
-            if st.form_submit_button("Register Account"):
-                u_data = user_sheet.get_all_records()
-                u_df = pd.DataFrame(u_data)
-                if not u_df.empty and 'Email' in u_df.columns and n_email in u_df['Email'].values:
-                    st.warning("Email already exists.")
-                elif n_email and n_pass:
-                    # Storing headers: Email, Name, Country (Dummy), Currency, Monthly_Income, Tax_Rate, Password
-                    user_sheet.append_row([n_email, n_name, "India", n_curr, n_income, n_tax, hash_password(n_pass)])
-                    st.success("Welcome to Paisa-Dasangu! Now please Login.")
-                else:
-                    st.error("All fields are required.")
+            if st.form_submit_button("Create Account"):
+                user_sheet.append_row([n_email, n_name, "India", n_curr, n_income, n_tax, hash_password(n_pass)])
+                st.success("Account created! Please Login.")
     st.stop()
 
-# --- 4. DATA PROCESSING ---
+# --- 5. DATA LOADING & MATH ---
 u_email = st.session_state['user']
-u_raw = user_sheet.get_all_records()
-u_df = pd.DataFrame(u_raw)
+u_df = pd.DataFrame(user_sheet.get_all_records())
 u_df.columns = u_df.columns.str.strip()
 u_profile = u_df[u_df['Email'] == u_email].iloc[0]
 
 CURRENCY = u_profile.get('Currency', '₹')
-NAME = u_profile.get('Name', 'User')
-income_val = float(u_profile.get('Monthly_Income', 0))
-tax_val = float(u_profile.get('Tax_Rate', 0))
-NET_INCOME = income_val * (1 - tax_val/100)
+NET_INCOME = float(u_profile.get('Monthly_Income', 0)) * (1 - float(u_profile.get('Tax_Rate', 0))/100)
 
-all_exp_list = expense_sheet.get_all_records()
-all_exp = pd.DataFrame(all_exp_list)
-
+all_exp = pd.DataFrame(expense_sheet.get_all_records())
 if not all_exp.empty:
     all_exp.columns = all_exp.columns.str.strip()
     my_exp = all_exp[all_exp['Email'].str.lower() == u_email].copy()
-    if not my_exp.empty and 'Amount' in my_exp.columns:
-        my_exp['Amount'] = pd.to_numeric(my_exp['Amount'], errors='coerce').fillna(0)
-        total_spent = my_exp['Amount'].sum()
-    else:
-        total_spent = 0.0
+    my_exp['Amount'] = pd.to_numeric(my_exp['Amount'], errors='coerce').fillna(0)
+    total_spent = my_exp['Amount'].sum()
 else:
     my_exp = pd.DataFrame()
     total_spent = 0.0
 
 rem_bal = NET_INCOME - total_spent
-daily_safe = max(0, rem_bal / 30) # Simple 30-day average for now
 
-# --- 5. MAIN DASHBOARD ---
-st.title(f"📈 {NAME}'s Paisa-Dasangu")
-st.sidebar.title("Settings")
-st.sidebar.write(f"User: {u_email}")
-if st.sidebar.button("Logout"):
-    st.session_state.update({'auth': False, 'user': None})
-    st.rerun()
+# --- 6. DASHBOARD UI ---
+st.title(f"📈 {u_profile['Name']}'s Paisa-Dasangu")
+st.sidebar.button("Logout", on_click=lambda: st.session_state.update({'auth':False}))
 
-col1, col2 = st.columns(2)
-col1.metric("Current Balance", f"{CURRENCY}{rem_bal:,.0f}")
-col2.metric("Total Spent", f"{CURRENCY}{total_spent:,.0f}")
+c1, c2 = st.columns(2)
+c1.metric("Balance", f"{CURRENCY}{rem_bal:,.0f}")
+c2.metric("Spent", f"{CURRENCY}{total_spent:,.0f}")
 
-st.info(f"💡 **Safe to Spend Today:** {CURRENCY}{daily_safe:,.0f}")
+# --- 7. THE AI "WHATSAPP" INPUT ---
+st.markdown('<div class="instruction-card"><b>Quick Log:</b> Just type like you are messaging a friend!</div>', unsafe_allow_html=True)
+ai_input = st.text_input("Message Paisa-Dasangu:", placeholder="e.g. 150 for masala dosa or petrol 1000")
 
-# --- 6. WHATSAPP-STYLE QUICK LOG (AI PREP) ---
-st.subheader("🚀 Quick Log (WhatsApp Style)")
-ai_input = st.text_input("Chat with Paisa-Dasangu:", placeholder="e.g. 500 for dinner or Paid 2000 for electricity bill")
 if ai_input:
-    st.write("✨ *AI Parsing Feature coming tomorrow!*")
-
-# --- 7. MANUAL ENTRY ---
-with st.expander("📝 Manual Entry"):
-    with st.form("exp_form", clear_on_submit=True):
-        f_item = st.text_input("Item")
-        f_amt = st.number_input("Amount", min_value=0.0)
-        f_cat = st.selectbox("Category", ["Food", "Transport", "Bills", "Shopping", "Misc"])
-        if st.form_submit_button("Add Record"):
-            expense_sheet.append_row([str(datetime.date.today()), f_item, f_amt, f_cat, u_email])
-            st.success("Hisaab Updated!")
-            st.rerun()
+    try:
+        with st.spinner("Recording your hisaab..."):
+            data = ask_paisa_dasangu(ai_input)
+            if data['amount'] > 0:
+                expense_sheet.append_row([str(datetime.date.today()), data['item'], data['amount'], data['category'], u_email])
+                st.toast(f"✅ Saved: {data['item']} ({CURRENCY}{data['amount']})", icon="💰")
+                st.rerun()
+            else:
+                st.warning("I couldn't find an amount. Please specify the price!")
+    except Exception as e:
+        st.error("AI is a bit sleepy. Try again or use manual entry below.")
 
 # --- 8. HISTORY ---
-st.subheader("📜 Recent Transactions")
-if not my_exp.empty:
-    st.dataframe(my_exp.drop(columns=['Email']).iloc[::-1], use_container_width=True, hide_index=True)
+with st.expander("📝 Manual Entry & History"):
+    # Optional Manual Form
+    with st.form("manual"):
+        m_item = st.text_input("Item")
+        m_amt = st.number_input("Amount", min_value=0.0)
+        m_cat = st.selectbox("Category", ["Food", "Transport", "Bills", "Shopping", "Health", "Misc"])
+        if st.form_submit_button("Add Manually"):
+            expense_sheet.append_row([str(datetime.date.today()), m_item, m_amt, m_cat, u_email])
+            st.rerun()
+    
+    st.divider()
+    if not my_exp.empty:
+        st.dataframe(my_exp.drop(columns=['Email']).iloc[::-1], use_container_width=True, hide_index=True)
