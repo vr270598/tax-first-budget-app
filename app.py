@@ -33,7 +33,8 @@ def setup_ai():
             st.error("Missing GOOGLE_API_KEY in secrets!")
             return None
         genai.configure(api_key=api_key)
-        return genai.GenerativeModel('gemini-1.5-flash')
+        # Using the most stable model name for 2026/latest API versions
+        return genai.GenerativeModel('gemini-1.5-flash-latest')
     except Exception as e:
         st.error(f"AI Setup Error: {e}")
         return None
@@ -54,16 +55,16 @@ def ask_paisa_dasangu(user_text):
     3. If 'item' is missing, use 'Unknown'.
     """
     try:
+        if model is None: return None
         response = model.generate_content(prompt)
-        # Regex to find the JSON block inside potential markdown backticks
+        # Regex to find the JSON block inside potential markdown or extra text
         match = re.search(r'\{.*\}', response.text, re.DOTALL)
         if match:
             return json.loads(match.group())
         else:
-            # Fallback if AI sends plain text
             return {"item": "Manual Entry Required", "amount": 0, "category": "Misc"}
     except Exception as e:
-        st.error(f"AI Error: {e}")
+        st.error(f"AI Connection Error: {e}")
         return None
 
 # --- 3. CLOUD CONNECTION (GOOGLE SHEETS) ---
@@ -81,7 +82,7 @@ def get_google_sheets():
         sh = client.open_by_key(sheet_id)
         return sh.worksheet("Users"), sh.worksheet("Expenses")
     except Exception as e:
-        st.error(f"Connection Error: {e}")
+        st.error(f"Google Sheets Connection Error: {e}")
         st.stop()
 
 user_sheet, expense_sheet = get_google_sheets()
@@ -100,7 +101,8 @@ if not st.session_state['auth']:
             e_log = st.text_input("Email").lower().strip()
             p_log = st.text_input("Password", type="password")
             if st.form_submit_button("Sign In"):
-                u_df = pd.DataFrame(user_sheet.get_all_records())
+                u_data = user_sheet.get_all_records()
+                u_df = pd.DataFrame(u_data)
                 if not u_df.empty:
                     u_df.columns = u_df.columns.str.strip()
                     match = u_df[u_df['Email'].str.lower() == e_log]
@@ -123,16 +125,18 @@ if not st.session_state['auth']:
                 st.success("Account created! Please Login.")
     st.stop()
 
-# --- 5. DATA LOADING & MATH ---
+# --- 5. DATA LOADING & CALCULATIONS ---
 u_email = st.session_state['user']
-u_df = pd.DataFrame(user_sheet.get_all_records())
+u_data_all = user_sheet.get_all_records()
+u_df = pd.DataFrame(u_data_all)
 u_df.columns = u_df.columns.str.strip()
 u_profile = u_df[u_df['Email'] == u_email].iloc[0]
 
 CURRENCY = u_profile.get('Currency', '₹')
 NET_INCOME = float(u_profile.get('Monthly_Income', 0)) * (1 - float(u_profile.get('Tax_Rate', 0))/100)
 
-all_exp = pd.DataFrame(expense_sheet.get_all_records())
+all_exp_list = expense_sheet.get_all_records()
+all_exp = pd.DataFrame(all_exp_list)
 if not all_exp.empty:
     all_exp.columns = all_exp.columns.str.strip()
     my_exp = all_exp[all_exp['Email'].str.lower() == u_email].copy()
@@ -149,36 +153,40 @@ st.title(f"📈 {u_profile['Name']}'s Paisa-Dasangu")
 st.sidebar.button("Logout", on_click=lambda: st.session_state.update({'auth':False}))
 
 c1, c2 = st.columns(2)
-c1.metric("Balance", f"{CURRENCY}{rem_bal:,.0f}")
-c2.metric("Spent", f"{CURRENCY}{total_spent:,.0f}")
+c1.metric("Current Balance", f"{CURRENCY}{rem_bal:,.0f}")
+c2.metric("Total Spent", f"{CURRENCY}{total_spent:,.0f}")
 
 # --- 7. THE AI "QUICK LOG" ---
-st.markdown('<div class="instruction-card"><b>Quick Log:</b> Message Paisa-Dasangu to record expenses.</div>', unsafe_allow_html=True)
+st.markdown('<div class="instruction-card"><b>Quick Log:</b> Message Paisa-Dasangu (e.g., "Lunch 200" or "Added 500 for petrol")</div>', unsafe_allow_html=True)
 
 with st.form("ai_form", clear_on_submit=True):
-    ai_input = st.text_input("Type here:", placeholder="e.g. 500 for dinner or 100 rickshaw")
-    submit_ai = st.form_submit_button("SEND TO PAISA-DASANGU")
+    ai_input = st.text_input("Type here:", placeholder="Message your finance buddy...")
+    submit_ai = st.form_submit_button("LOG VIA AI")
 
 if submit_ai and ai_input:
-    with st.spinner("Recording your hisaab..."):
+    with st.spinner("Paisa-Dasangu is thinking..."):
         data = ask_paisa_dasangu(ai_input)
         if data and data.get('amount', 0) > 0:
             expense_sheet.append_row([str(datetime.date.today()), data['item'], data['amount'], data['category'], u_email])
             st.toast(f"✅ Saved: {data['item']} ({CURRENCY}{data['amount']})", icon="💰")
             st.rerun()
         else:
-            st.warning("I couldn't find an amount. Try again!")
+            st.warning("Could not find an amount. Please try again (e.g. 'Spent 50 on tea')")
 
 # --- 8. HISTORY ---
-with st.expander("📝 Manual Entry & History"):
+with st.expander("📝 Manual Entry & Transaction History"):
     with st.form("manual", clear_on_submit=True):
-        m_item = st.text_input("Item")
+        m_item = st.text_input("Item Name")
         m_amt = st.number_input("Amount", min_value=0.0)
         m_cat = st.selectbox("Category", ["Food", "Transport", "Bills", "Shopping", "Health", "Misc"])
         if st.form_submit_button("Add Record Manually"):
             expense_sheet.append_row([str(datetime.date.today()), m_item, m_amt, m_cat, u_email])
+            st.success("Entry added manually!")
             st.rerun()
     
     st.divider()
     if not my_exp.empty:
+        # Displaying columns except Email in descending order (latest first)
         st.dataframe(my_exp.drop(columns=['Email']).iloc[::-1], use_container_width=True, hide_index=True)
+    else:
+        st.info("No transactions logged yet.")
