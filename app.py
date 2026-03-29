@@ -33,11 +33,16 @@ def setup_ai():
             st.error("Missing GOOGLE_API_KEY in secrets!")
             return None
         genai.configure(api_key=api_key)
-        # Using the most stable model name for 2026/latest API versions
-        return genai.GenerativeModel('gemini-1.5-flash-latest')
+        
+        # This is the exact technical ID for the Gemini 3 Flash Preview
+        return genai.GenerativeModel('gemini-3-flash-preview')
     except Exception as e:
-        st.error(f"AI Setup Error: {e}")
-        return None
+        # Emergency Fallback to Gemini 1.5 if the preview is down for maintenance
+        try:
+            return genai.GenerativeModel('gemini-1.5-flash')
+        except:
+            st.error(f"Paisa-Dasangu Brain is offline: {e}")
+            return None
 
 model = setup_ai()
 
